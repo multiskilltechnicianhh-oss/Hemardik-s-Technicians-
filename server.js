@@ -17,6 +17,7 @@ const OWNER_TXT_FILE = path.join(DATA_DIR, 'Owner Information.txt');
 const CUSTOMER_TXT_FILE = path.join(DATA_DIR, 'Customer Information.txt');
 const SAMPLE_DIR = path.join(DATA_DIR, 'Work Samples');
 const SAMPLE_META_FILE = path.join(DATA_DIR, 'Work Samples.json');
+const WEBSITE_INFO_TXT_FILE = path.join(DATA_DIR, 'Website Information.txt');
 fs.mkdirSync(DATA_DIR, {recursive:true});
 fs.mkdirSync(SAMPLE_DIR, {recursive:true});
 
@@ -125,8 +126,12 @@ function writeSeparateTextFiles(all){
     ownerBlocks.push(ownerText(siteId,state));
     customerBlocks.push(customerText(siteId,state));
   }
-  fs.writeFileSync(OWNER_TXT_FILE,ownerBlocks.join('\n\n'),'utf8');
-  fs.writeFileSync(CUSTOMER_TXT_FILE,customerBlocks.join('\n\n'),'utf8');
+  const ownerTextAll=ownerBlocks.join('\n\n');
+  const customerTextAll=customerBlocks.join('\n\n');
+  fs.writeFileSync(OWNER_TXT_FILE,ownerTextAll,'utf8');
+  fs.writeFileSync(CUSTOMER_TXT_FILE,customerTextAll,'utf8');
+  // Combined archive requested for the website information record.
+  fs.writeFileSync(WEBSITE_INFO_TXT_FILE,ownerTextAll+'\n\n'+customerTextAll,'utf8');
 }
 
 function mergeState(oldState, incoming, event){
@@ -192,7 +197,7 @@ function persistOrderAndCustomer(siteId,order,customer,state){
   save(all);
 }
 
-app.get('/api/health',(req,res)=>res.json({ok:true,service:'multiskill-technician-backend'}));
+app.get('/api/health',(req,res)=>res.json({ok:true,service:'hemardik-technicians-backend'}));
 
 app.post('/api/customer-signup',(req,res)=>{
   try{
@@ -293,20 +298,67 @@ app.post('/api/send-owner-email', async (req,res)=>{
   }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}
 });
 
+
+function customerPublicState(st){
+  const s=st||{};
+  const wi=s.websiteInformation||{};
+  const cm=wi.customerMode||{};
+  return {
+    siteId:s.siteId,
+    updatedAt:s.updatedAt,
+    customers:Array.isArray(s.customers)?s.customers:[],
+    orders:Array.isArray(s.orders)?s.orders:[],
+    skills:Array.isArray(s.skills)?s.skills:[],
+    skillsInitialized:s.skillsInitialized===true,
+    workSamples:Array.isArray(s.workSamples)?s.workSamples:[],
+    websiteInformation:{
+      updatedAt:wi.updatedAt,
+      customerMode:{
+        signupHistory:Array.isArray(cm.signupHistory)?cm.signupHistory:[],
+        loginHistory:Array.isArray(cm.loginHistory)?cm.loginHistory:[],
+        customers:Array.isArray(cm.customers)?cm.customers:[],
+        orders:Array.isArray(cm.orders)?cm.orders:[],
+        workSamples:Array.isArray(cm.workSamples)?cm.workSamples:[]
+      }
+    }
+  };
+}
+
 app.post('/api/site-sync',(req,res)=>{
   try{
     const {siteId,event,state,order}=req.body||{};
+    const mode=String(req.body?.mode||'customer').toLowerCase()==='owner'?'owner':'customer';
     if(!siteId||!state)return res.status(400).json({ok:false,error:'Missing siteId/state'});
     const all=load();
-    all[siteId]=mergeState(all[siteId],{...state,siteId,order},String(event||'update'));
+    if(mode==='customer'){
+      // Customer deployments may update customer accounts/orders only.
+      // Owner-only fields (password, owner profile, owner history) are ignored.
+      const current=all[siteId]||{siteId,customers:[],orders:[],skills:[],workSamples:[]};
+      const incoming={
+        siteId,
+        customers:Array.isArray(state.customers)?state.customers:[],
+        orders:Array.isArray(state.orders)?state.orders:[],
+        workSamples:Array.isArray(state.workSamples)?state.workSamples:[],
+        websiteInformation:{
+          customerMode:(state.websiteInformation&&state.websiteInformation.customerMode)||{}
+        }
+      };
+      const merged=mergeState(current,incoming,String(event||'customer_update'));
+      // Preserve owner state exactly as stored; mergeState above receives no owner fields.
+      all[siteId]=merged;
+    }else{
+      all[siteId]=mergeState(all[siteId],{...state,siteId,order},String(event||'update'));
+    }
     save(all);
-    res.json({ok:true,updatedAt:all[siteId].updatedAt,state:all[siteId]});
+    const responseState=mode==='customer'?customerPublicState(all[siteId]):all[siteId];
+    res.json({ok:true,updatedAt:all[siteId].updatedAt,state:responseState});
   }catch(e){res.status(500).json({ok:false,error:String(e.message||e)});}
 });
 
 app.get('/api/site-sync',(req,res)=>{
   res.set('Cache-Control','no-store, no-cache, must-revalidate, proxy-revalidate');
   const siteId=String(req.query.siteId||'');
+  const mode=String(req.query.mode||'customer').toLowerCase()==='owner'?'owner':'customer';
   if(!siteId)return res.status(400).json({ok:false,error:'Missing siteId'});
   const all=load();
   const stored=all[siteId];
@@ -317,7 +369,8 @@ app.get('/api/site-sync',(req,res)=>{
   if(state.skillsInitialized!==true && (!Array.isArray(state.skills)||state.skills.length===0)) delete state.skills;
   const samples=loadSamples()[siteId]||[];
   state.workSamples=mergeWorkSamples(state.workSamples,samples);
-  res.json({ok:true,siteId,state});
+  const responseState=mode==='owner'?state:customerPublicState(state);
+  res.json({ok:true,siteId,state:responseState});
 });
 
 app.get('/api/work-samples',(req,res)=>{
@@ -416,5 +469,5 @@ app.use(express.static(__dirname));
 const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on port ${PORT}`);
+  console.log(`Hemardik's Technicians website server running on port ${PORT}`);
 });
